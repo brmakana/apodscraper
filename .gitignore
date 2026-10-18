@@ -1,0 +1,6 @@
+.gradle/
+build/
+data/
+downloadedImages/
+application-local.yml
+*.log

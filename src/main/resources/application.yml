@@ -1,0 +1,21 @@
+spring:
+  main:
+    web-application-type: none
+    banner-mode: on
+apod:
+  initial-url: https://science.nasa.gov/apod/
+  # start-url: https://science.nasa.gov/image-article/apod-2019-june-24-anticrepuscular-rays-converge-opposite-the-sun/
+  download-directory: "/Volumes/Tuff nano Plus/apodscraperImages"
+  state-directory: ./data
+  request-interval: 100ms
+  rate-limit-per-second: 20
+  download-workers: 4
+  queue-size: 16
+  connect-timeout: 15s
+  request-timeout: 120s
+  max-attempts: 3
+  retry-backoff: 2s
+  shutdown-grace-period: 60s
+  retry-failed: false
+  # Zero means unlimited; counts traversed pages, including already visited pages.
+  page-limit: 0

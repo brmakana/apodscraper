@@ -1,0 +1,116 @@
+# APOD Scraper
+
+A Java 21 / Spring Boot batch application that follows NASA Astronomy Picture of the Day pages backward and downloads the linked full-resolution images. Page discovery runs sequentially; a bounded queue feeds configurable download workers. CSV state supports resuming interrupted runs and explicitly retrying failed days.
+
+## Build and run
+
+Requires a Java 21 JDK. The Gradle wrapper downloads the pinned Gradle distribution and dependencies on its first run.
+
+```sh
+./gradlew test build
+java -jar build/libs/apodscraper-1.0.0.jar --apod.page-limit=3
+```
+
+The first run processes the current day at `https://science.nasa.gov/apod/`, then follows `a.smd-next-prev__prev`. Subsequent runs resume the saved crawl cursor. Omit `page-limit` (or set it to zero) to continue through the archive.
+
+To choose an initial historical article:
+
+```sh
+java -jar build/libs/apodscraper-1.0.0.jar \
+  --apod.start-url=https://science.nasa.gov/image-article/apod-2019-june-24-anticrepuscular-rays-converge-opposite-the-sun/ \
+  --apod.page-limit=1
+```
+
+`start-url` overrides the saved cursor each time it is supplied. Remove it on the next run to resume normally. Known outcomes are still deduplicated. `page-limit` counts traversed pages, including known pages; recovery/retry of previously discovered jobs happens independently of that limit.
+
+## Configuration and mounted storage
+
+Defaults live in `src/main/resources/application.yml`. An `application.yml` in the process working directory can override them through Spring Boot's standard configuration loading. Command-line properties also override YAML.
+
+Example external `application.yml`:
+
+```yaml
+apod:
+  download-directory: /Volumes/ArchiveDrive/APOD/downloadedImages
+  state-directory: ./data
+  request-interval: 100ms
+  rate-limit-per-second: 20
+  download-workers: 2
+  queue-size: 16
+  retry-failed: false
+```
+
+The download directory can be absolute or relative to the process working directory. Its parent must already exist; only the final directory is created. Mount the drive and create `/Volumes/ArchiveDrive/APOD` first for the example above. This avoids creating an entire missing mount path on the local disk. The application verifies writability and remembers the directory/filesystem identity during the run. If storage disappears or changes, it stops new discovery and retains unfinished jobs. Remount the drive and restart to resume. An existing empty mount-point directory alone cannot prove that the intended drive is mounted; check the mount before starting.
+
+Images retain their source filenames. When distinct images have the same filename, the later image uses a date subdirectory, for example `2019-06-23/photo.jpg`. Existing unrelated files are never silently overwritten. Temporary image files are written on the destination filesystem. CSV file paths are relative to the download directory, so the collection can be moved as a unit and the configuration updated without editing state.
+
+| Property under `apod` | Default | Meaning |
+| --- | --- | --- |
+| `initial-url` | `https://science.nasa.gov/apod/` | Bootstrap URL when no history/cursor exists |
+| `start-url` | unset | Explicit article/frontier override |
+| `download-directory` | `./downloadedImages` | Image destination, including mounted drives |
+| `state-directory` | `./data` | Independent CSV state location |
+| `request-interval` | `100ms` | Minimum spacing between request permits |
+| `rate-limit-per-second` | `20` | Global rolling one-second request ceiling |
+| `download-workers` | `2` | Maximum simultaneous image download jobs |
+| `queue-size` | `16` | Maximum image jobs waiting in memory |
+| `connect-timeout` | `15s` | Connection establishment timeout |
+| `request-timeout` | `120s` | Timeout for each HTTP hop, including its response body |
+| `max-attempts` | `3` | Total attempts for a transiently failing request |
+| `retry-backoff` | `2s` | Initial exponential backoff, multiplier capped at 1024 |
+| `shutdown-grace-period` | `60s` | Time to drain image workers after discovery stops |
+| `retry-failed` | `false` | Explicitly replay failed pages/downloads once through the retry policy per run |
+| `page-limit` | `0` | Maximum pages traversed this run; zero is unlimited |
+
+All HTML requests, image downloads, redirects, and retries share the same request scheduler. Both pacing controls apply, so the default spacing permits at most ten starts per second despite the twenty-per-second ceiling. There are no accumulated burst credits. The ceiling limits request starts, not bandwidth or active transfers. HTTP 429 pauses the shared scheduler using `Retry-After` or the backoff default; HTTP 503 with `Retry-After` also pauses it. Network failures, HTTP 408/429, and 5xx responses receive bounded retries. Other HTTP errors and deterministic parser errors are recorded immediately. These settings cannot guarantee that a remote site will accept the traffic.
+
+## CSV state, failures, and resume
+
+`data/visited.csv` stores outcomes:
+
+- `DOWNLOADED`: the image was saved and its SHA-256 digest and byte count persisted.
+- `SKIPPED_VIDEO`: explicit video/embed markup was found in the main media area.
+- `FAILED`: fetching, parsing, or downloading failed. The record includes a stage, attempts, timestamp, and error. Its date may be blank if it could not be established; its page URL remains the identity.
+
+A missing image alone is a parsing failure, not a video skip. If a failed page still has a valid previous-day link, crawling continues. If that link cannot be found, the cursor becomes `BLOCKED` and discovery stops. Normal restarts report that blockage without requesting the failed page again. Correct the cause, then enable retries or supply another known starting article URL. The application does not guess unknown article slugs.
+
+```sh
+java -jar build/libs/apodscraper-1.0.0.jar --apod.retry-failed=true
+```
+
+This retries failed entries through the bounded retry policy once per run. Turn it off afterward to avoid retrying persistent failures on every restart. Successful retries replace the failed record. A `start-url` override alone does not retry known failures.
+
+`data/work.csv` holds pending/ready image jobs plus one crawl cursor. The cursor advances in discovery order, independently of worker completion order. A job is persisted before publication; a verified image is marked `READY` with size and digest before moving to its final path. Its visited outcome is then persisted before retiring the job. Startup reconciles stale work against visited outcomes and recognizes already-saved `READY` images by digest. Missing or modified completed images are queued for repair. Abandoned `.apod-*.part` files are removed at startup.
+
+Both CSVs have this header:
+
+```text
+record_type,date,page_url,status,image_url,local_path,previous_page_url,checksum,bytes,failure_stage,attempts,last_attempt_at,last_error
+```
+
+`PAGE` rows use ISO dates (`YYYY-MM-DD`), relative image paths, SHA-256 checksums, and UTC timestamps. `work.csv` also contains a `CURSOR` row: `page_url` holds the next/blocked page and `status` is `NEW`, `ACTIVE`, `BLOCKED`, or `DONE`; other cursor fields are empty or zero. Work page statuses are `PENDING` and `READY`. `attempts` describes the most recent fetch/download stage, not a lifetime total.
+
+Writes are serialized and use a flushed temporary CSV followed by atomic replacement when supported, with a non-atomic replacement fallback for filesystems that lack atomic moves. The two CSVs are reconciled rather than treated as a single transaction. A file lock prevents simultaneous runs using the same state directory. Use one state directory per collection; do not run separate state directories against the same image destination concurrently.
+
+Malformed headers, duplicate page URLs, invalid dates/statuses, and unsafe stored paths stop startup with an error. To repair state, stop the application, back up both CSVs together, correct the reported row or restore a consistent backup, then restart. Do not delete state casually: existing files without matching metadata are treated as unrelated files and may require manual reconciliation.
+
+## Shutdown and results
+
+Ctrl+C/SIGTERM stops discovery, then lets workers drain for the configured grace period. Transfers still running afterward are cancelled; pending CSV jobs survive for the next run. The same drain limit applies at the archive boundary and page limit. Increase it if individual images take longer than sixty seconds.
+
+The final log reports totals and remaining jobs. Exit code zero means no recorded failures or blocked cursor; interrupted/drain-limited work may still be pending and is reported in that log. Unresolved failed entries, blocked traversal, configuration problems, and storage/state errors return a nonzero code. A storage error leaves affected work pending rather than classifying a good page as permanently failed.
+
+## Verification and scope
+
+```sh
+./gradlew test build
+```
+
+Offline JUnit tests use a local HTTP server and minimal NASA DOM excerpts. They cover parser selection and dates, videos, CSV corruption and crash recovery, request pacing/cooldowns, retries and redirects, stalled/truncated responses, safe filenames and collisions, worker concurrency/backpressure, mounted-storage loss, persistence failure, shutdown, and restart behavior.
+
+Bounded live checks on October 18, 2026 verified:
+
+- [The June 24, 2019 article](https://science.nasa.gov/image-article/apod-2019-june-24-anticrepuscular-rays-converge-opposite-the-sun/): downloaded the linked 1,469,707-byte JPEG, 5600×3525, and saved the previous-day cursor.
+- [The APOD landing page](https://science.nasa.gov/apod/): parsed the embedded October 18, 2026 video, recorded a skip, and saved the October 17 article as the next cursor.
+
+The parser targets NASA Science's current `media-detail-hero__media`, date table, and previous-link structure. Historical variants may produce explicit failures that need parser updates. The only implicit end-of-archive boundary is June 16, 1995, the beginning of [NASA's APOD archive](https://apod.nasa.gov/rjn/apod/archivepix.html); missing navigation on another day is a failure. The application follows links rather than assuming every calendar date exists. After a historical crawl, automatically checking for newly published days is outside the current scope; supply a new starting article to begin another traversal with the existing state.
