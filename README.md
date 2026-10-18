@@ -42,7 +42,7 @@ apod:
 
 The download directory can be absolute or relative to the process working directory. Its parent must already exist; only the final directory is created. Mount the drive and create `/Volumes/ArchiveDrive/APOD` first for the example above. This avoids creating an entire missing mount path on the local disk. The application verifies writability and remembers the directory/filesystem identity during the run. If storage disappears or changes, it stops new discovery and retains unfinished jobs. Remount the drive and restart to resume. An existing empty mount-point directory alone cannot prove that the intended drive is mounted; check the mount before starting.
 
-Images retain their source filenames. When distinct images have the same filename, the later image uses a date subdirectory, for example `2019-06-23/photo.jpg`. Existing unrelated files are never silently overwritten. Temporary image files are written on the destination filesystem. CSV file paths are relative to the download directory, so the collection can be moved as a unit and the configuration updated without editing state.
+Images retain their source filenames. If the destination filename already exists, the page is recorded as `SKIPPED_DUPLICATE` without downloading or saving another copy. This also applies when a different remote URL uses the same filename; the first saved file wins without fetching the remote image to compare contents. Saved image URLs are recognized through verified CSV metadata, including files in legacy date subdirectories. New date folders are no longer created, and existing date folders remain untouched. Deduplication uses filenames and saved URLs; separate filenames are handled independently. Temporary image files are written on the destination filesystem. CSV file paths are relative to the download directory, so the collection can be moved as a unit and the configuration updated without editing state.
 
 | Property under `apod` | Default | Meaning |
 | --- | --- | --- |
@@ -70,6 +70,7 @@ All HTML requests, image downloads, redirects, and retries share the same reques
 
 - `DOWNLOADED`: the image was saved and its SHA-256 digest and byte count persisted.
 - `SKIPPED_VIDEO`: explicit video/embed markup was found in the main media area.
+- `SKIPPED_DUPLICATE`: the destination filename already exists or the image URL has a verified saved copy. The record references the existing file and its metadata. It is a successful processed outcome and is skipped on restart, including when `retry-failed` is enabled.
 - `FAILED`: fetching, parsing, or downloading failed. The record includes a stage, attempts, timestamp, and error. Its date may be blank if it could not be established; its page URL remains the identity.
 
 A missing image alone is a parsing failure, not a video skip. If a failed page still has a valid previous-day link, crawling continues. If that link cannot be found, the cursor becomes `BLOCKED` and discovery stops. Normal restarts report that blockage without requesting the failed page again. Correct the cause, then enable retries or supply another known starting article URL. The application does not guess unknown article slugs.
@@ -92,13 +93,13 @@ record_type,date,page_url,status,image_url,local_path,previous_page_url,checksum
 
 Writes are serialized and use a flushed temporary CSV followed by atomic replacement when supported, with a non-atomic replacement fallback for filesystems that lack atomic moves. The two CSVs are reconciled rather than treated as a single transaction. A file lock prevents simultaneous runs using the same state directory. Use one state directory per collection; do not run separate state directories against the same image destination concurrently.
 
-Malformed headers, duplicate page URLs, invalid dates/statuses, and unsafe stored paths stop startup with an error. To repair state, stop the application, back up both CSVs together, correct the reported row or restore a consistent backup, then restart. Do not delete state casually: existing files without matching metadata are treated as unrelated files and may require manual reconciliation.
+Malformed headers, duplicate page URLs, invalid dates/statuses, and unsafe stored paths stop startup with an error. To repair state, stop the application, back up both CSVs together, correct the reported row or restore a consistent backup, then restart. Preserve state when moving the collection: without that metadata, existing filenames are still skipped as duplicates, but the original download history and saved crawl cursor are lost.
 
 ## Shutdown and results
 
 Ctrl+C/SIGTERM stops discovery, then lets workers drain for the configured grace period. Transfers still running afterward are cancelled; pending CSV jobs survive for the next run. The same drain limit applies at the archive boundary and page limit. Increase it if individual images take longer than sixty seconds.
 
-The final log reports totals and remaining jobs. Exit code zero means no recorded failures or blocked cursor; interrupted/drain-limited work may still be pending and is reported in that log. Unresolved failed entries, blocked traversal, configuration problems, and storage/state errors return a nonzero code. A storage error leaves affected work pending rather than classifying a good page as permanently failed.
+The final log reports downloaded, video-skip, duplicate-skip, and failure totals plus remaining jobs. Exit code zero means no recorded failures or blocked cursor; interrupted/drain-limited work may still be pending and is reported in that log. Unresolved failed entries, blocked traversal, configuration problems, and storage/state errors return a nonzero code. A storage error leaves affected work pending rather than classifying a good page as permanently failed.
 
 ## Verification and scope
 

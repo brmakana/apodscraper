@@ -43,4 +43,19 @@ class CsvStateTest {
     @Test void secondProcessLockIsRejected() throws Exception {
         try (var state = new CsvState(root)) { assertThrows(Exception.class, () -> new CsvState(root)); }
     }
+    @Test void skippedDuplicateRoundTripsAndRetiresStaleWork() throws Exception {
+        Entry duplicate = Entry.unknown("https://example.test/duplicate")
+                .file("photo.jpg", "saved digest", 20, "SKIPPED_DUPLICATE")
+                .outcome("SKIPPED_DUPLICATE", "", 0, "");
+        Path stale = root.resolve("stale.csv");
+        try (var state = new CsvState(root)) {
+            state.job(Entry.unknown(duplicate.url())); Files.copy(root.resolve("work.csv"), stale);
+            state.finish(duplicate);
+        }
+        Files.copy(stale, root.resolve("work.csv"), StandardCopyOption.REPLACE_EXISTING);
+        try (var state = new CsvState(root)) {
+            assertEquals(duplicate, state.visited(duplicate.url())); assertTrue(state.pending().isEmpty());
+            assertEquals(0, state.failures());
+        }
+    }
 }

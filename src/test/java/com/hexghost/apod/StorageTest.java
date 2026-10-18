@@ -28,13 +28,36 @@ class StorageTest {
         Files.createSymbolicLink(root.resolve("images/link"), root);
         assertThrows(Storage.Failure.class, () -> storage.resolve("link/outside"));
     }
-    @Test void distinctImagesWithSameFilenameKeepOriginalNames() throws Exception {
+    @Test void existingFilenameIsSkippedWithoutDownloadingOrCreatingDateFolder() throws Exception {
         var storage = new Storage(root.resolve("images"));
-        try (var state = new CsvState(root.resolve("state"))) {
-            Entry first = new Entry("https://example.test/a", "2019-06-24", "", "https://example.test/a/photo.jpg", "PENDING", "", "", 0, 0, "", "", "");
-            Entry second = new Entry("https://example.test/b", "2019-06-23", "", "https://example.test/b/photo.jpg", "PENDING", "", "", 0, 0, "", "", "");
-            assertEquals("photo.jpg", storage.reserve(first, state).localPath());
-            assertEquals("2019-06-23/photo.jpg", storage.reserve(second, state).localPath());
+        Files.writeString(root.resolve("images/photo.jpg"), "already saved");
+        try (var server = new TestSupport.Server(); var state = new CsvState(root.resolve("state"));
+             var http = new HttpFetcher(TestSupport.config(root), new RequestScheduler(java.time.Duration.ZERO, 1000))) {
+            Entry job = new Entry(server.url("/day"), "2019-06-23", "", server.url("/other/photo.jpg"), "PENDING", "", "", 0, 0, "", "", "");
+            state.job(job);
+            Entry result = storage.download(job, state, http);
+            assertEquals("SKIPPED_DUPLICATE", result.status());
+            assertEquals("photo.jpg", result.localPath()); assertTrue(storage.verified(result));
+            assertEquals(result, state.visited(job.url())); assertTrue(state.pending().isEmpty());
+            assertTrue(server.requests.isEmpty());
+            assertFalse(Files.exists(root.resolve("images/2019-06-23")));
+            assertEquals("already saved", Files.readString(root.resolve("images/photo.jpg")));
+        }
+    }
+    @Test void legacyDatedSavedImageIsRecognizedByUrlWithoutSavingAnotherCopy() throws Exception {
+        var storage = new Storage(root.resolve("images"));
+        Files.createDirectory(root.resolve("images/2019-06-24"));
+        Path legacy = root.resolve("images/2019-06-24/photo.jpg"); Files.writeString(legacy, "original");
+        try (var server = new TestSupport.Server(); var state = new CsvState(root.resolve("state"));
+             var http = new HttpFetcher(TestSupport.config(root), new RequestScheduler(java.time.Duration.ZERO, 1000))) {
+            Entry saved = new Entry(server.url("/first"), "2019-06-24", "", server.url("/photo.jpg"), "DOWNLOADED",
+                    "2019-06-24/photo.jpg", Storage.hash(legacy), Files.size(legacy), 1, "", "", "");
+            state.finish(saved);
+            Entry job = new Entry(server.url("/second"), "2019-06-23", "", saved.image(), "PENDING", "", "", 0, 0, "", "", "");
+            Entry result = storage.download(job, state, http);
+            assertEquals("SKIPPED_DUPLICATE", result.status()); assertEquals(saved.localPath(), result.localPath());
+            assertTrue(server.requests.isEmpty()); assertFalse(Files.exists(root.resolve("images/photo.jpg")));
+            assertTrue(Files.exists(legacy));
         }
     }
     @Test void digestBasedRecoveryWorksAfterRelocatingCollection() throws Exception {

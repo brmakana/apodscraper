@@ -206,8 +206,50 @@ class PipelineTest {
             assertEquals(1, server.requests.stream().filter("/shared.jpg"::equals).count());
             try (var state = new CsvState(root.resolve("state"))) {
                 assertEquals(2, state.outcomes().size());
-                assertTrue(state.outcomes().stream().allMatch(e -> e.status().equals("DOWNLOADED") && e.localPath().equals("shared.jpg")));
+                assertEquals(1, state.outcomes().stream().filter(e -> e.status().equals("DOWNLOADED")).count());
+                assertEquals(1, state.outcomes().stream().filter(e -> e.status().equals("SKIPPED_DUPLICATE")).count());
+                assertTrue(state.outcomes().stream().allMatch(e -> e.localPath().equals("shared.jpg")));
             }
+            int requests = server.requests.size();
+            assertEquals(0, new Pipeline(TestSupport.config(root, "initial-url", server.url("/a"), "retry-failed", "true")).run());
+            assertEquals(requests, server.requests.size());
+        }
+    }
+    @Test void concurrentDifferentUrlsWithSameFilenameSaveOnlyOneCopy() throws Exception {
+        try (var server = new TestSupport.Server()) {
+            server.text("/a", TestSupport.page("June 17, 1995", TestSupport.image("/first/photo.jpg"), "/b"));
+            server.text("/b", TestSupport.page("June 16, 1995", TestSupport.image("/second/photo.jpg"), null));
+            server.handle("/first/photo.jpg", ex -> {
+                try { Thread.sleep(150); } catch (InterruptedException ignored) { }
+                TestSupport.Server.reply(ex, 200, "image/jpeg", "first image".getBytes());
+            });
+            server.image("/second/photo.jpg", "different image");
+            assertEquals(0, new Pipeline(TestSupport.config(root, "initial-url", server.url("/a"))).run());
+            assertEquals(1, server.requests.stream().filter(p -> p.endsWith("photo.jpg")).count());
+            try (var state = new CsvState(root.resolve("state"))) {
+                assertEquals(1, state.outcomes().stream().filter(e -> e.status().equals("DOWNLOADED")).count());
+                assertEquals(1, state.outcomes().stream().filter(e -> e.status().equals("SKIPPED_DUPLICATE")).count());
+                assertTrue(state.pending().isEmpty());
+            }
+            try (var files = Files.list(root.resolve("images"))) { assertEquals(1, files.count()); }
+            int count = server.requests.size();
+            assertEquals(0, new Pipeline(TestSupport.config(root, "initial-url", server.url("/a"))).run());
+            assertEquals(count, server.requests.size());
+        }
+    }
+    @Test void existingUntrackedFileIsSkippedAndRememberedOnRestart() throws Exception {
+        Files.createDirectory(root.resolve("images")); Files.writeString(root.resolve("images/photo.jpg"), "keep this file");
+        try (var server = new TestSupport.Server()) {
+            server.text("/last", TestSupport.page("June 16, 1995", TestSupport.image("/photo.jpg"), null));
+            server.image("/photo.jpg", "remote image");
+            var config = TestSupport.config(root, "initial-url", server.url("/last"));
+            assertEquals(0, new Pipeline(config).run());
+            try (var state = new CsvState(root.resolve("state"))) {
+                assertEquals("SKIPPED_DUPLICATE", state.visited(server.url("/last")).status());
+            }
+            assertEquals("keep this file", Files.readString(root.resolve("images/photo.jpg")));
+            assertEquals(1, server.requests.size());
+            assertEquals(0, new Pipeline(config).run()); assertEquals(1, server.requests.size());
         }
     }
     @Test void retriedDownloadFailureIsNotAttemptedTwiceAtExplicitFrontier() throws Exception {

@@ -81,8 +81,9 @@ final class Pipeline implements AutoCloseable {
             exitCode = state.failures() > 0 || state.cursorStatus().equals("BLOCKED") ? 1 : 0;
             long downloaded = state.outcomes().stream().filter(e -> e.status().equals("DOWNLOADED")).count();
             long skipped = state.outcomes().stream().filter(e -> e.status().equals("SKIPPED_VIDEO")).count();
-            log.info("Finished: {} downloaded, {} videos skipped, {} failed, {} pending; cursor {} {}",
-                    downloaded, skipped, state.failures(), state.pending().size(), state.cursorStatus(), state.cursor());
+            long duplicates = state.outcomes().stream().filter(e -> e.status().equals("SKIPPED_DUPLICATE")).count();
+            log.info("Finished: {} downloaded, {} videos skipped, {} duplicates skipped, {} failed, {} pending; cursor {} {}",
+                    downloaded, skipped, duplicates, state.failures(), state.pending().size(), state.cursorStatus(), state.cursor());
         } catch (Exception e) {
             exitCode = 1; log.error("APOD scrape stopped: {}", e.getMessage(), e);
         } finally {
@@ -170,7 +171,10 @@ final class Pipeline implements AutoCloseable {
                 Entry entry = queue.poll(100, TimeUnit.MILLISECONDS);
                 if (entry == null) continue;
                 try {
-                    storage.download(entry, state, http); log.info("Downloaded {} {}", entry.date(), entry.image());
+                    Entry result = storage.download(entry, state, http);
+                    if (result.status().equals("SKIPPED_DUPLICATE"))
+                        log.info("Skipped duplicate {} {} (already saved at {})", result.date(), result.image(), result.localPath());
+                    else log.info("Downloaded {} {}", entry.date(), entry.image());
                 } catch (HttpFetcher.FetchFailure e) {
                     state.finish(entry.outcome("FAILED", "DOWNLOAD", e.attempts, e.getMessage()));
                     log.warn("Download failed {}: {}", entry.url(), e.getMessage());

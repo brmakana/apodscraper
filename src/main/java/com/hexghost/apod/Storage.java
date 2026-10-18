@@ -14,7 +14,7 @@ final class Storage {
     private final Path root;
     private final Object rootKey;
     private final FileStore store;
-    private final java.util.concurrent.ConcurrentHashMap<String, Object> imageLocks = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> filenameLocks = new java.util.concurrent.ConcurrentHashMap<>();
     Storage(Path configured) throws IOException {
         root = configured.toAbsolutePath().normalize();
         if (!Files.isDirectory(root.getParent())) throw new Failure("Download parent must already exist (is the drive mounted?): " + root.getParent(), null);
@@ -48,56 +48,37 @@ final class Storage {
             throw new HttpFetcher.FetchFailure("Unsafe/missing image filename: " + image, 1, null);
         return name;
     }
-    synchronized Entry reserve(Entry e, CsvState state) throws IOException {
-        check();
-        if (!e.localPath().isEmpty() && !state.pathOwned(e.localPath(), e.image()) && !Files.exists(resolve(e.localPath()))) {
-            ensureParent(resolve(e.localPath()));
-            return e;
-        }
-        String name = filename(e.image());
-        String path = name;
-        if (state.pathOwned(path, e.image()) || Files.exists(resolve(path))) path = e.date() + "/" + name;
-        if (state.pathOwned(path, e.image()) || Files.exists(resolve(path)))
-            throw new Failure("Image filename collision cannot be resolved safely: " + path, null);
-        Path target = resolve(path);
-        ensureParent(target);
-        e = e.file(path, "", 0, "PENDING");
-        state.job(e); // Reserve before another worker chooses a target.
-        return e;
-    }
-    private void ensureParent(Path target) throws IOException {
-        if (!target.getParent().equals(root)) {
-            try { Files.createDirectory(target.getParent()); }
-            catch (FileAlreadyExistsException exists) {
-                if (!Files.isDirectory(target.getParent())) throw new Failure("Image date directory is not a directory", exists);
-            }
-        }
-    }
     boolean verified(Entry e) throws IOException {
         check();
         if (e.localPath().isBlank() || e.checksum().isBlank()) return false;
         Path file = resolve(e.localPath());
         return Files.isRegularFile(file) && Files.size(file) == e.bytes() && hash(file).equals(e.checksum());
     }
-    void download(Entry job, CsvState state, HttpFetcher http) throws IOException, InterruptedException {
-        // Repeated APODs can share an image URL. Serialize only those jobs so one transfer
-        // establishes a verified file that the others can reuse without racing a final move.
-        synchronized (imageLocks.computeIfAbsent(job.image(), ignored -> new Object())) {
+    Entry download(Entry job, CsvState state, HttpFetcher http) throws IOException, InterruptedException {
+        // Different URLs can share a filename. The first saved file wins, and waiting
+        // workers skip it instead of racing a final move or creating date directories.
+        synchronized (filenameLocks.computeIfAbsent(filename(job.image()), ignored -> new Object())) {
             if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
-            downloadLocked(job, state, http);
+            return downloadLocked(job, state, http);
         }
     }
-    private void downloadLocked(Entry job, CsvState state, HttpFetcher http) throws IOException, InterruptedException {
-        if (verified(job)) { state.finish(job.outcome("DOWNLOADED", "", job.attempts(), "")); return; }
-        // Reuse only a file whose saved URL, size and digest establish its identity.
+    private Entry downloadLocked(Entry job, CsvState state, HttpFetcher http) throws IOException, InterruptedException {
+        // A matching file saved by this very job before a crash is still a download completion.
+        if (verified(job)) return finish(state, job.outcome("DOWNLOADED", "", job.attempts(), ""));
+        // Saved images from legacy date subdirectories can also establish a duplicate URL.
         for (Entry existing : state.outcomes()) {
-            if (existing.status().equals("DOWNLOADED") && existing.image().equals(job.image()) && verified(existing)) {
-                state.finish(job.file(existing.localPath(), existing.checksum(), existing.bytes(), "DOWNLOADED")
-                        .outcome("DOWNLOADED", "", 0, ""));
-                return;
+            if ((existing.status().equals("DOWNLOADED") || existing.status().equals("SKIPPED_DUPLICATE"))
+                    && existing.image().equals(job.image()) && verified(existing)) {
+                return finish(state, job.file(existing.localPath(), existing.checksum(), existing.bytes(), "SKIPPED_DUPLICATE")
+                        .outcome("SKIPPED_DUPLICATE", "", 0, ""));
             }
         }
-        Entry reserved = reserve(job, state);
+        String name = filename(job.image());
+        Entry duplicate = skipExisting(job, name, 0, state);
+        if (duplicate != null) return duplicate;
+        check();
+        Entry reserved = job.file(name, "", 0, "PENDING");
+        state.job(reserved);
         Path temp;
         try { temp = Files.createTempFile(root, ".apod-", ".part"); }
         catch (IOException e) { throw new Failure("Cannot create temporary image on download drive", e); }
@@ -119,12 +100,31 @@ final class Storage {
                 Entry ready = reserved.file(reserved.localPath(), digest, size, "READY")
                         .outcome("READY", "", result.attempts(), "");
                 state.job(ready); // Recoverable if the process dies immediately after the move.
-                Files.move(temp, resolve(ready.localPath())); // No replacement of an existing image.
-                state.finish(ready.outcome("DOWNLOADED", "", result.attempts(), ""));
+                try { Files.move(temp, resolve(ready.localPath())); } // Never replace an existing image.
+                catch (FileAlreadyExistsException exists) {
+                    Entry lateDuplicate = skipExisting(job, name, result.attempts(), state);
+                    if (lateDuplicate != null) return lateDuplicate;
+                    throw exists;
+                }
+                return finish(state, ready.outcome("DOWNLOADED", "", result.attempts(), ""));
             } catch (IOException e) { throw new Failure("Cannot finalize downloaded image", e); }
         } finally {
             try { Files.deleteIfExists(temp); } catch (IOException ignored) { /* Preserve original failure. */ }
         }
+    }
+    private Entry skipExisting(Entry job, String path, int attempts, CsvState state) throws IOException {
+        check();
+        Path file = resolve(path);
+        if (!Files.exists(file)) return null;
+        if (!Files.isRegularFile(file)) throw new Failure("Image destination is not a regular file: " + file, null);
+        // Filename collisions are deliberately treated as duplicates without fetching the
+        // remote image to compare contents. Retain the first file and record its metadata.
+        return finish(state, job.file(path, hash(file), Files.size(file), "SKIPPED_DUPLICATE")
+                .outcome("SKIPPED_DUPLICATE", "", attempts, ""));
+    }
+    private Entry finish(CsvState state, Entry entry) throws IOException {
+        state.finish(entry);
+        return entry;
     }
     static String hash(Path file) throws IOException {
         try {

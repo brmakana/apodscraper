@@ -64,10 +64,6 @@ final class CsvState implements AutoCloseable {
         return java.util.stream.Stream.concat(visited.values().stream(), work.values().stream())
                 .anyMatch(other -> other.date().equals(entry.date()) && !other.url().equals(entry.url()));
     }
-    synchronized boolean pathOwned(String path, String image) {
-        return java.util.stream.Stream.concat(visited.values().stream(), work.values().stream())
-                .anyMatch(e -> e.localPath().equals(path) && !e.image().equals(image));
-    }
     private void saveWork() throws IOException { save(directory.resolve("work.csv"), work, true); }
     private void save(Path target, Map<String, Entry> entries, boolean includeCursor) throws IOException {
         Path temp = Files.createTempFile(directory, ".state-", ".csv.tmp");
@@ -110,7 +106,7 @@ final class CsvState implements AutoCloseable {
                 if (!e.image().isEmpty()) Urls.validate(URI.create(e.image()));
                 if (!e.localPath().isEmpty() && (Path.of(e.localPath()).isAbsolute() || Path.of(e.localPath()).normalize().startsWith("..")))
                     throw new IOException("Unsafe local image path in CSV");
-                if (!(isWork ? Set.of("PENDING", "READY") : Set.of("DOWNLOADED", "SKIPPED_VIDEO", "FAILED")).contains(e.status()))
+                if (!(isWork ? Set.of("PENDING", "READY") : Set.of("DOWNLOADED", "SKIPPED_VIDEO", "SKIPPED_DUPLICATE", "FAILED")).contains(e.status()))
                     throw new IOException("Invalid page status: " + e.status());
                 if (e.bytes() < 0 || e.attempts() < 0) throw new IOException("Negative counts in CSV");
                 if (into.putIfAbsent(url, e) != null) throw new IOException("Duplicate page URL: " + url);

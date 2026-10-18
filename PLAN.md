@@ -62,7 +62,7 @@ Validate selectors and bootstrap behavior against representative live NASA pages
 
 Use a serialized state writer and two CSV files:
 
-- `visited.csv`: `date,page_url,status,image_url,local_path,previous_page_url,failure_stage,attempts,last_attempt_at,last_error`, where status is `DOWNLOADED`, `SKIPPED_VIDEO`, or `FAILED`. A failed record is an attempted page, not a successful download. Write download completion only after the final image has been successfully saved. Allow an empty date when parsing/fetching fails before the APOD date can be established; retain the known page URL as its identity.
+- `visited.csv`: `date,page_url,status,image_url,local_path,previous_page_url,failure_stage,attempts,last_attempt_at,last_error`, where status is `DOWNLOADED`, `SKIPPED_VIDEO`, `SKIPPED_DUPLICATE`, or `FAILED`. A failed record is an attempted page, not a successful download. Write download completion only after the final image has been successfully saved. Allow an empty date when parsing/fetching fails before the APOD date can be established; retain the known page URL as its identity.
 - `work.csv`: durable discovery and download state, including `date,page_url,previous_page_url,image_url,status,attempts,last_error`. Include a durable crawl-cursor record so discovery can resume even when downloads finish out of order. Specify record types and headers in the README.
 
 Persistence rules:
@@ -82,8 +82,8 @@ Failure progression: if media/date extraction fails but a valid previous-page li
 ## 4. Image downloading and failure handling
 
 - Stream HTTP bodies to uniquely named temporary files in the destination filesystem, keeping memory usage bounded. Validate HTTP success, image content type, nonempty content, and expected response length when available before moving to the final filename.
-- Preserve the source URL's filename, excluding query parameters and rejecting unsafe filesystem names. If distinct images have the same filename, retain the filename inside a date subdirectory under `downloadedImages/`; never silently overwrite a different image.
-- Deduplicate queued and completed jobs by canonical page URL and APOD date. Reuse an existing image only when persisted metadata establishes its identity.
+- Preserve the source URL's filename, excluding query parameters and rejecting unsafe filesystem names. Per the user's duplicate-handling amendment, if the destination filename already exists, record `SKIPPED_DUPLICATE` and skip downloading/saving another copy. The first saved file wins even if the remote URL differs; do not create date subdirectories. Retain existing date folders and recognize saved URLs through verified metadata.
+- Deduplicate queued and completed jobs by canonical page URL and APOD date. Record reuse of a verified saved image URL as `SKIPPED_DUPLICATE`. Treat existing filename collisions as duplicate skips; coordinate workers by destination filename.
 - Retry transient connection failures, rate limits, and server failures with bounded exponential backoff through the shared request scheduler. Permanent HTTP failures and deterministic parser errors become `FAILED` without repeatedly retrying the same response during the run.
 - When a page or download becomes `FAILED`, persist its visited record before retiring or marking its work record failed, and allow other discovered downloads to finish. Leave it excluded from automatic retries until `retry-failed` is enabled. If fetching/parsing a page prevents finding the previous link, stop discovery at that page and retain its blocked cursor.
 - Propagate persistence errors to the coordinator and stop new discovery. Exit with a nonzero code when unresolved failures remain. Log useful page/date context, retry counts, skips, and final totals.
@@ -115,4 +115,4 @@ Implementation order: scaffold and configuration → parser and fixtures → CSV
 
 ## Approval scope
 
-The user approved implementation of this plan in the repository. Defaults include an in-process queue, CSV-based durable work tracking alongside visited outcomes, shared request pacing and a twenty-per-second ceiling configured in `application.yml`, explicit opt-in retries for `FAILED` entries, processing the starting day itself, recording video skips, and date subdirectories only when needed to preserve colliding filenames.
+The user approved implementation of this plan in the repository. Defaults include an in-process queue, CSV-based durable work tracking alongside visited outcomes, shared request pacing and a twenty-per-second ceiling configured in `application.yml`, explicit opt-in retries for `FAILED` entries, processing the starting day itself, recording video skips, and the subsequent user amendment to skip duplicate filenames/saved URLs with `SKIPPED_DUPLICATE` instead of creating date subdirectories.
