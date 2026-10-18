@@ -52,6 +52,7 @@ final class PageParser {
                 var anchor = img == null ? null : img.closest("a[href]");
                 if (anchor != null) try { image = Urls.validate(URI.create(anchor.absUrl("href"))).toString(); }
                 catch (IllegalArgumentException ignored) { }
+                if (image.isEmpty()) image = rolloverImage(media);
             }
         }
         if (date == null) error = append(error, "Cannot determine APOD date");
@@ -59,6 +60,25 @@ final class PageParser {
         if (previous.isEmpty() && !boundary) error = append(error, "Missing previous-page navigation");
         if (previous.equals(url)) error = append(error, "Previous link points to the same page");
         return new Page(url, date, previous, image, video, boundary, error);
+    }
+    private String rolloverImage(Element media) {
+        var primary = media.selectFirst(".smd-image-rollover img.smd-image-rollover__image--primary[src]");
+        if (primary == null) return "";
+        try {
+            URI source = Urls.validate(URI.create(primary.absUrl("src")));
+            // This NASA component has no download anchor. Its static asset path names the
+            // original; the query parameters request resized/cropped presentation variants.
+            // Restrict this fallback to that component and asset service, not arbitrary thumbnails.
+            if (!"assets.science.nasa.gov".equalsIgnoreCase(source.getHost())
+                    || !source.getPath().toLowerCase(Locale.ROOT).matches(".*\\.(jpe?g|png|gif|webp|tiff?|avif)$")) return "";
+            String dynamicPrefix = "/dynamicimage/assets/science/";
+            if (source.getRawPath().startsWith(dynamicPrefix)) {
+                // NASA's dynamic-image service exposes the same asset under this static path.
+                return source.resolve("/content/dam/science/" + source.getRawPath().substring(dynamicPrefix.length())).toString();
+            }
+            if (!source.getPath().startsWith("/content/dam/science/")) return "";
+            return source.toString().split("[?#]", 2)[0];
+        } catch (IllegalArgumentException ignored) { return ""; }
     }
     private String append(String a, String b) { return a.isEmpty() ? b : a + "; " + b; }
 }
