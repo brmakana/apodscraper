@@ -1,7 +1,15 @@
 spring:
   main:
     web-application-type: none
-    banner-mode: on
+    banner-mode: off
+logging:
+  file:
+    name: ./logs/apodscraper.log
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 7
+      total-size-cap: 100MB
 apod:
   initial-url: https://science.nasa.gov/apod/
   # start-url: https://science.nasa.gov/image-article/apod-2019-june-24-anticrepuscular-rays-converge-opposite-the-sun/
