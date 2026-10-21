@@ -12,7 +12,7 @@ class PageParserTest {
         var p = parser.parse(html, URI.create("https://science.nasa.gov/image-article/apod-2019-june-24-example/"));
         assertEquals(LocalDate.of(2019, 6, 24), p.date());
         assertTrue(p.image().endsWith("/AnticrepuscularRays_Patekar_5600.jpg"));
-        assertFalse(p.image().contains("?")); assertTrue(p.previous().contains("apod-2019-june-23-"));
+        assertFalse(p.image().contains("?")); assertEquals("https://apod.nasa.gov/apod/ap190623.html", p.previous());
         assertEquals("", p.error());
     }
     @Test void actualNasaLandingVideoExcerpt() throws Exception {
@@ -88,5 +88,32 @@ class PageParserTest {
                 + "<img class='smd-image-rollover__image--primary' src='https://assets.science.nasa.gov/content/dam/science/preview.jpg?w=100'></a></div>";
         var p = parser.parse(TestSupport.page("May 26, 2026", media, "/previous"), URI.create("https://science.nasa.gov/day"));
         assertEquals("https://science.nasa.gov/explicit-original.jpg", p.image()); assertEquals("", p.error());
+    }
+    @Test void brokenCutoffPageStillAdvancesAfterRedirect() {
+        var p = parser.parse("<title>APOD: 2020 August 13 - Example</title>",
+                URI.create("https://science.nasa.gov/image-article/apod-2020-august-13-example/"));
+        assertEquals("https://apod.nasa.gov/apod/ap200812.html", p.previous());
+        assertTrue(p.error().contains("full-resolution"));
+        assertFalse(p.error().contains("navigation"));
+    }
+    @Test void switchesAtCutoffAndPreservesModernDates() {
+        assertEquals("https://apod.nasa.gov/apod/ap200813.html", Urls.archiveUrl(
+                "https://science.nasa.gov/image-article/apod-2020-august-13-example/"));
+        String modern = "https://science.nasa.gov/image-article/apod-2020-august-14-example/";
+        assertEquals(modern, Urls.archiveUrl(modern));
+        var p = parser.parse(TestSupport.page("August 14, 2020", TestSupport.image("/full.jpg"),
+                "https://science.nasa.gov/image-article/apod-2020-august-13-example/"), URI.create(modern));
+        assertEquals("https://apod.nasa.gov/apod/ap200813.html", p.previous());
+    }
+    @Test void originalHtmlAndCenturyBoundary() {
+        var p = parser.parse("<center><a href='image/full.jpg'><img src='thumb.jpg'></a></center>",
+                URI.create("https://apod.nasa.gov/apod/ap000101.html"));
+        assertEquals(LocalDate.of(2000, 1, 1), p.date());
+        assertEquals("https://apod.nasa.gov/apod/ap991231.html", p.previous());
+        assertEquals("https://apod.nasa.gov/apod/image/full.jpg", p.image());
+        assertEquals("", p.error());
+        var first = parser.parse("<center><a href='image/full.jpg'><img src='thumb.jpg'></a></center>",
+                URI.create("https://apod.nasa.gov/apod/ap950616.html"));
+        assertTrue(first.boundary()); assertEquals("", first.previous()); assertEquals("", first.error());
     }
 }

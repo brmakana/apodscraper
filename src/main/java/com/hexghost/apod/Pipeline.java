@@ -40,7 +40,7 @@ final class Pipeline implements AutoCloseable {
                 if (config.retryFailed()) for (Entry e : state.outcomes()) {
                     if (e.failed() && e.image().isEmpty() && !stopping.get()) process(e.url(), null, state, storage, http);
                 }
-                String current = start;
+                String current = Urls.archiveUrl(start);
                 Set<String> seen = new HashSet<>();
                 LocalDate lastDay = null;
                 int pages = 0;
@@ -56,7 +56,7 @@ final class Pipeline implements AutoCloseable {
                     pages++;
                     if (result == null) break;
                     if (result.day() != null) lastDay = result.day();
-                    current = result.previous();
+                    current = Urls.archiveUrl(result.previous());
                     if (current.isEmpty()) state.cursor("", "DONE");
                     else state.cursor(current, "ACTIVE");
                 }
@@ -111,6 +111,7 @@ final class Pipeline implements AutoCloseable {
     }
     private Entry process(String url, LocalDate lastDay, CsvState state, Storage storage, HttpFetcher http)
             throws IOException, InterruptedException {
+        url = Urls.archiveUrl(url);
         Entry known = state.visited(url);
         // The job may have completed or failed while discovery was catching up with replayed work.
         // Reuse its navigation metadata without attempting that job again in this run.
