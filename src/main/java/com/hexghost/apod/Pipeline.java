@@ -102,7 +102,8 @@ final class Pipeline implements AutoCloseable {
     private String chooseStart(CsvState state) throws IOException {
         if (config.startUrl() != null) return Urls.canonical(config.startUrl());
         if (state.cursorStatus().equals("DONE")) return "";
-        if (state.cursorStatus().equals("BLOCKED") && !config.retryFailed()) {
+        if (state.cursorStatus().equals("BLOCKED") && !config.retryFailed()
+                && !wrongArchiveDate(state.cursor(), state.visited(state.cursor()))) {
             log.error("Crawl blocked at {}; enable apod.retry-failed or provide apod.start-url", state.cursor()); return "";
         }
         if (!state.cursor().isEmpty()) return state.cursor();
@@ -113,6 +114,7 @@ final class Pipeline implements AutoCloseable {
             throws IOException, InterruptedException {
         url = Urls.archiveUrl(url);
         Entry known = state.visited(url);
+        if (wrongArchiveDate(url, known)) known = null;
         // The job may have completed or failed while discovery was catching up with replayed work.
         // Reuse its navigation metadata without attempting that job again in this run.
         if (scheduled.containsKey(url)) known = scheduled.get(url);
@@ -127,7 +129,7 @@ final class Pipeline implements AutoCloseable {
         attemptedPages.add(url);
         try {
             var fetched = http.html(URI.create(url)); attempts = fetched.attempts();
-            page = new PageParser().parse(fetched.response().body(), fetched.response().uri());
+            page = new PageParser().parse(fetched.response().body(), fetched.response().uri(), URI.create(url));
         } catch (HttpFetcher.FetchFailure e) {
             state.finish(Entry.unknown(url).outcome("FAILED", "FETCH", e.attempts, e.getMessage()));
             state.cursor(url, "BLOCKED"); log.warn("Page failed: {}: {}", url, e.getMessage()); return null;
@@ -160,6 +162,12 @@ final class Pipeline implements AutoCloseable {
             publish(entry); log.info("Queued {} {}", entry.date(), entry.image());
         }
         return entry;
+    }
+    private boolean wrongArchiveDate(String url, Entry entry) {
+        LocalDate expected = Urls.date(URI.create(url));
+        return entry != null && entry.failed() && expected != null
+                && !expected.isAfter(Urls.LEGACY_CUTOFF) && !expected.isBefore(Urls.FIRST_DAY)
+                && !expected.equals(entry.day());
     }
     private void publish(Entry entry) throws InterruptedException {
         if (scheduled.putIfAbsent(entry.url(), entry) != null) return;

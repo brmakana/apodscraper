@@ -14,6 +14,20 @@ final class PageParser {
     private static final DateTimeFormatter URL_DATE = DateTimeFormatter.ofPattern("uuuu-MMMM-d", Locale.US);
     private static final Pattern SLUG_DATE = Pattern.compile("apod-(\\d{4}-[a-z]+-\\d{1,2})(?:-|/|$)", Pattern.CASE_INSENSITIVE);
     private static final Pattern TITLE_DATE = Pattern.compile("APOD:\\s*(\\d{4} [A-Za-z]+ \\d{1,2})");
+    Page parse(String html, URI uri, URI requested) {
+        Page page = parse(html, uri);
+        LocalDate expected = Urls.date(requested);
+        if (expected != null && !expected.isAfter(Urls.LEGACY_CUTOFF) && !expected.isBefore(Urls.FIRST_DAY)
+                && !expected.equals(page.date())) {
+            // A missing archive page may redirect to today's landing page. Never download
+            // that unrelated media under the historical date or follow its navigation.
+            boolean boundary = expected.equals(Urls.FIRST_DAY);
+            return new Page(Urls.canonical(requested), expected,
+                    boundary ? "" : Urls.legacy(expected.minusDays(1)), "", false, boundary,
+                    "Requested archive date " + expected + " but response date was " + page.date());
+        }
+        return page;
+    }
     Page parse(String html, URI uri) {
         var doc = Jsoup.parse(html, uri.toString());
         String url = Urls.canonical(uri), previous = "", image = "", error = "";

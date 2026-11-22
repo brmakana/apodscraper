@@ -116,4 +116,19 @@ class PageParserTest {
                 URI.create("https://apod.nasa.gov/apod/ap950616.html"));
         assertTrue(first.boundary()); assertEquals("", first.previous()); assertEquals("", first.error());
     }
+    @Test void historicalRedirectToTodayFailsWithHistoricalNavigation() {
+        var p = parser.parse(TestSupport.page("October 21, 2026", TestSupport.image("/today.jpg"), "/yesterday"),
+                URI.create("https://science.nasa.gov/apod/"), URI.create("https://apod.nasa.gov/apod/ap200610.html"));
+        assertEquals(LocalDate.of(2020, 6, 10), p.date());
+        assertEquals("https://apod.nasa.gov/apod/ap200609.html", p.previous());
+        assertEquals("", p.image()); assertFalse(p.video());
+        assertTrue(p.error().contains("response date"));
+    }
+    @Test void matchingHistoricalRedirectKeepsImage() {
+        var p = parser.parse(TestSupport.page("June 10, 2020", TestSupport.image("/correct.jpg"), null),
+                URI.create("https://science.nasa.gov/image-article/apod-2020-june-10-example/"),
+                URI.create("https://apod.nasa.gov/apod/ap200610.html"));
+        assertEquals("https://science.nasa.gov/correct.jpg", p.image()); assertEquals("", p.error());
+        assertEquals("https://apod.nasa.gov/apod/ap200609.html", p.previous());
+    }
 }
